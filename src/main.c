@@ -3,6 +3,13 @@
 
 bool flag_timer = true;
 
+#define CM_BASE 0x44E10000
+#define GPMC_A12 0x830  // gpio1_12
+
+#define GPIO1_BASE 0x4804C000
+#define GPIO_DATAIN 0x138
+#define GPIO1_DATAIN (GPIO1_BASE + GPIO_DATAIN)
+
 #define DMTimerWaitForWrite(reg)        \
   if (HWREG(DMTIMER_TSICR) & 0x4)       \
     while ((reg & HWREG(DMTIMER_TWPS))) \
@@ -110,6 +117,11 @@ void gpioSetup() {
   HWREG(CM_PER_GPIO1_CLKCTRL) = 0x40002;
 
   // TODO: Mux of GPIO to use
+  HWREG(CM_BASE + GPMC_A12) |= 0x7;
+  HWREG(CM_BASE + GPMC_A12) &= ~(0b11 << 3);  // active pull up/down and pull down select
+  HWREG(GPIO1_OE) |= (1 << 12);
+
+  HWREG(GPIO1_OE) &= ~(1 << 21);  // led
 }
 
 void Timer_IRQHandler(void) {
@@ -138,7 +150,14 @@ int main(void) {
   timerSetup();
   disableWdt();
 
-  putString("Hello World\n\r", 14);
+  while (true) {
+    unsigned int read = HWREG(GPIO1_DATAIN);
+    if (read & (1 << 12)) {
+      HWREG(GPIO1_SETDATAOUT) |= (1 << 21);
+    } else {
+      HWREG(GPIO1_CLEARDATAOUT) |= (1 << 21);
+    }
+  }
 
   return (0);
 }
