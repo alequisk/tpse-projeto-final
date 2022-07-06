@@ -1,0 +1,1 @@
+setenv app "setenv autoload no;setenv ipaddr 1.0.0.2;setenv serverip 1.0.0.3;tftp 0x80000000 /tftpboot/app.bin;echo ***Booting to BareMetal ***;go 0x80000000"

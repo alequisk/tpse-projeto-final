@@ -6,9 +6,23 @@ bool flag_timer = true;
 #define CM_BASE 0x44E10000
 #define GPMC_A12 0x830  // gpio1_12
 
+#define INTC_MIR_CLEAR3 0xE8
+
 #define GPIO1_BASE 0x4804C000
 #define GPIO_DATAIN 0x138
+#define GPIO_IRQSTATUS_0 0x2C
+#define GPIO_IRQSTATUS_SET_0 0x34
+#define GPIO_IRQSTATUS_CLEAR_0 0x3C
 #define GPIO1_DATAIN (GPIO1_BASE + GPIO_DATAIN)
+
+#define GPIO_RISINGDETECT 0x148
+
+#define GPMC_AD14 0x838
+
+#define SENSOR_1 12
+#define SENSOR_2 14
+
+unsigned int currentCount;
 
 #define DMTimerWaitForWrite(reg)        \
   if (HWREG(DMTIMER_TSICR) & 0x4)       \
@@ -69,6 +83,19 @@ void timerDisable() {
   HWREG(DMTIMER_TCLR) &= ~(0x1);
 } /* -----  end of function timerEnable  ----- */
 
+void delaySync(unsigned int msec) {
+  while (msec != 0) {
+    DMTimerWaitForWrite(0x2);
+    HWREG(DMTIMER_TCRR) = 0;
+
+    timerEnable();
+    while (HWREG(DMTIMER_TCRR) < TIMER_1MS_COUNT)
+      ;
+    msec--;
+    timerDisable();
+  }
+}
+
 void delay(unsigned int mSec) {
   unsigned int countVal = TIMER_OVERFLOW - (mSec * TIMER_1MS_COUNT);
 
@@ -102,26 +129,28 @@ void timerSetup(void) {
     ;
 
   /* Interrupt mask */
-  HWREG(INTC_MIR_CLEAR2) |=
-      (1 << 31);  //(95 --> Bit 31 do 3º registrador (MIR CLEAR2))
+  HWREG(INTC_MIR_CLEAR2) |= (1 << 31);  //(95 --> Bit 31 do 3º registrador (MIR CLEAR2))
 }
 
-/*
- * ===  FUNCTION
- * ====================================================================== Name:
- * gpioSetup Description:
- * =====================================================================================
- */
 void gpioSetup() {
   /* set clock for GPIO1, TRM 8.1.12.1.31 */
   HWREG(CM_PER_GPIO1_CLKCTRL) = 0x40002;
 
-  // TODO: Mux of GPIO to use
   HWREG(CM_BASE + GPMC_A12) |= 0x7;
-  HWREG(CM_BASE + GPMC_A12) &= ~(0b11 << 3);  // active pull up/down and pull down select
-  HWREG(GPIO1_OE) |= (1 << 12);
+  HWREG(CM_BASE + GPMC_AD14) |= 0x7;
+  HWREG(CM_BASE + GPMC_A12) &= ~(0b11 << 3);   // active pull up/down and pull down select
+  HWREG(CM_BASE + GPMC_AD14) &= ~(0b11 << 3);  // active pull up/down and pull down select
+
+  HWREG(GPIO1_OE) |= (1 << SENSOR_1);
+  HWREG(GPIO1_OE) |= (1 << SENSOR_2);
 
   HWREG(GPIO1_OE) &= ~(1 << 21);  // led
+
+  // setup interruption
+  HWREG(GPIO1_BASE + GPIO_IRQSTATUS_SET_0) |= (1 << SENSOR_1) | (1 << SENSOR_2);
+  HWREG(INTC_BASE + INTC_MIR_CLEAR3) |= (1 << 2);
+
+  HWREG(GPIO1_BASE + GPIO_RISINGDETECT) |= (1 << SENSOR_1) | (1 << SENSOR_2);
 }
 
 void Timer_IRQHandler(void) {
@@ -134,29 +163,158 @@ void Timer_IRQHandler(void) {
   timerDisable();
 }
 
+void Gpio1A_IRQHandler() {
+  unsigned int data = HWREG(GPIO1_DATAIN);
+
+  if (data & (1 << SENSOR_1)) {
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_CLEAR_0) |= (1 << SENSOR_2);  // disable sensor 2
+
+    data = HWREG(GPIO1_DATAIN);
+    bool ok = false;
+
+    while (data & (1 << SENSOR_1)) {
+      data = HWREG(GPIO1_DATAIN);
+      if (data & (1 << SENSOR_2)) {
+        ok = true;
+      }
+    }
+
+    if (ok) {
+      putString("Saiu alguem\n\r", 14);
+
+      if (currentCount > 0)
+        currentCount--;
+
+      while (data & (1 << SENSOR_2)) {
+        data = HWREG(GPIO1_DATAIN);
+      }
+    }
+
+    putString("SENSOR 1 foi acionado!\n\r", 25);
+
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_SET_0) |= (1 << SENSOR_2);  // renable sensor 2
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_0) |= (1 << SENSOR_1);
+
+  } else {
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_CLEAR_0) |= (1 << SENSOR_1);  // disable sensor 1
+
+    data = HWREG(GPIO1_DATAIN);
+
+    bool ok = false;
+
+    while (data & (1 << SENSOR_2)) {
+      data = HWREG(GPIO1_DATAIN);
+
+      if ((data & (1 << SENSOR_2))) {
+        ok = true;
+      }
+    }
+
+    if (ok) {
+      putString("Entrou alguem\n\r", 16);
+
+      currentCount++;
+
+      while (data & (1 << SENSOR_1)) {
+        data = HWREG(GPIO1_DATAIN);
+      }
+    }
+
+    putString("SENSOR 2 foi acionado!\n\r", 25);
+
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_SET_0) |= (1 << SENSOR_1);  // renable sensor 1
+    HWREG(GPIO1_BASE + GPIO_IRQSTATUS_0) |= (1 << SENSOR_2);
+  }
+}
+
 void ISR_Handler(void) {
   /* Verifica se é interrupção do DMTIMER7 */
   unsigned int irq_number = HWREG(INTC_SIR_IRQ) & 0x7f;
 
   if (irq_number == 95) Timer_IRQHandler();
+  if (irq_number == 98) Gpio1A_IRQHandler();
 
   /* Reconhece a IRQ */
   HWREG(INTC_CONTROL) = 0x1;
 }
 
+void delay2(int s) {
+  for (int k = 0; k < s; k++)
+    for (int i = 0; i < 1258291; i++)
+      ;
+}
+
+unsigned int toString(unsigned int value, char *buff) {
+  unsigned int len = 0;
+  while (value > 0u) {
+    buff[len++] = '0' + (value % 10);
+    value /= 10u;
+  }
+  if (len == 0) buff[len++] = '0';
+
+  for (int i = 0; i < len / 2; i++) {
+    char temp = buff[i];
+    buff[i] = buff[len - i - 1];
+    buff[len - i - 1] = temp;
+  }
+  return len;
+}
+
+void showTotal() {
+  char buff[128];
+  unsigned int len;
+  putString("Current peoples: ", 18);
+  len = toString(currentCount, buff);
+  putString(buff, len);
+
+  putString(" | Sensor 1: ", 13);
+  if (HWREG(GPIO1_DATAIN) & (1 << SENSOR_1)) {
+    putString("1 | Sensor 2: ", 15);
+  } else {
+    putString("0 | Sensor 2: ", 15);
+  }
+
+  if (HWREG(GPIO1_DATAIN) & (1 << SENSOR_2)) {
+    putString("1\n\r", 4);
+  } else {
+    putString("0\n\r", 4);
+  }
+}
+
 int main(void) {
   /* Hardware setup */
+
   gpioSetup();
   timerSetup();
   disableWdt();
 
+  putString("Waiting 1 minute to setup sensor\n\r", 35);
+
+  char buff[128];
+  unsigned int len;
+
+  currentCount = 0U;
+  goto skip;
+
+  for (int i = 0; i < 60; i++) {
+    delaySync(1000);
+    len = toString(i + 1, buff);
+    putString(buff, len);
+    putString("\n\r", 2);
+  }
+
+skip:
+
+  putString("Sensor is ready!\n\r", 19);
+
   while (true) {
-    unsigned int read = HWREG(GPIO1_DATAIN);
-    if (read & (1 << 12)) {
-      HWREG(GPIO1_SETDATAOUT) |= (1 << 21);
+    if (currentCount > 0u) {
+      HWREG(GPIO1_SETDATAOUT) |= 21;
     } else {
-      HWREG(GPIO1_CLEARDATAOUT) |= (1 << 21);
+      HWREG(GPIO1_CLEARDATAOUT) |= 21;
     }
+
+    showTotal();
   }
 
   return (0);
